@@ -13,7 +13,6 @@
 #include <ctime>
 #include <sstream>
 #include <iomanip>
-#include <ctime>
 #include <map>
 
 #pragma comment(lib, "wbemuuid.lib")
@@ -43,7 +42,6 @@ std::string getArgKey(const std::string& arg);
 
 int __cdecl main(int argc, char** argv) {
     HRESULT hres;
-    DWORD dwResult;
 
     // Initialize COM
     hres = CoInitializeEx(0, COINIT_MULTITHREADED);
@@ -160,7 +158,7 @@ int __cdecl main(int argc, char** argv) {
 
     // Connect to SMB share
     std::wstring smbSharePath = L"\\\\" + targetW + L"\\ADMIN$";
-    dwResult = ConnectToSMBShare(smbSharePath, domainW + L"\\" + usernameW, passwordW);
+    DWORD dwResult = ConnectToSMBShare(smbSharePath, domainW + L"\\" + usernameW, passwordW);
     if (dwResult != NO_ERROR) {
         std::cerr << "Failed to connect to SMB share. Error code = " << dwResult << std::endl;
         pSvc->Release();
