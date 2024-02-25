@@ -124,18 +124,6 @@ int __cdecl main(int argc, char** argv) {
     userAcct = &authIdent;
 
 
-    // Set security levels on a WMI connection
-    hres = CoSetProxyBlanket(
-        pSvc,                           // Indicates the proxy to set
-        RPC_C_AUTHN_DEFAULT,            // RPC_C_AUTHN_xxx
-        RPC_C_AUTHZ_DEFAULT,            // RPC_C_AUTHZ_xxx
-        COLE_DEFAULT_PRINCIPAL,         // Server principal name 
-        RPC_C_AUTHN_LEVEL_PKT_PRIVACY,  // RPC_C_AUTHN_LEVEL_xxx 
-        RPC_C_IMP_LEVEL_IMPERSONATE,    // RPC_C_IMP_LEVEL_xxx
-        userAcct,                       // client identity
-        EOAC_NONE                       // proxy capabilities 
-    );
-
     if (FAILED(hres))
     {
         std::cout << "Could not set proxy blanket. Error code = 0x"
