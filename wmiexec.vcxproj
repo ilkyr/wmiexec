@@ -129,7 +129,21 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="wmiexec.cpp" />
+    <ClCompile Include="argument_utility.cpp" />
+    <ClCompile Include="concat.cpp" />
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="output_handling.cpp" />
+    <ClCompile Include="remote_command.cpp" />
+    <ClCompile Include="smb_connection.cpp" />
+    <ClCompile Include="usage_utility.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="argument_utility.h" />
+    <ClInclude Include="concat.h" />
+    <ClInclude Include="output_handling.h" />
+    <ClInclude Include="remote_command.h" />
+    <ClInclude Include="smb_connection.h" />
+    <ClInclude Include="usage_utility.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
