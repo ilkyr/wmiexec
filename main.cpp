@@ -21,9 +21,12 @@
 #include "remote_command.h"
 #include "usage_utility.h"
 
+
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "credui.lib")
 #pragma comment(lib, "comsuppw.lib")
+#pragma comment(lib, "Mpr.lib")
+
 
 int __cdecl main(int argc, char** argv) {
     HRESULT hres;
