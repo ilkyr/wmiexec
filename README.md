@@ -16,6 +16,10 @@ This C++ program is inspired by Impacket's wmiexec.py and demonstrates how to us
 
 <Target-host> <Domain> <Username> <Password> <Command>
 
+```
+wmiexec.exe -t 192.168.40.128 -d villanova.local -u administrator -p Pa$$w0rd
+```
+
 Replace each placeholder with the appropriate values:
 
 - `<Target-host>`: The hostname or IP address of the target machine.
