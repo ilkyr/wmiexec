@@ -1,19 +1,16 @@
-#define _CRT_SECURE_NO_WARNINGS
-#define _WIN32_DCOM
-#define UNICODE
+﻿#define _WIN32_DCOM
+
 #include <iostream>
-#include <comdef.h>
-#include <Wbemidl.h>
-#include <wincred.h>
-#include <strsafe.h>
-#include <Windows.h>
 #include <string>
+#include <map>
 #include <fstream>
-#include <chrono>
-#include <ctime>
 #include <sstream>
 #include <iomanip>
-#include <map>
+#include <chrono>
+#include <ctime>
+#include <Windows.h>
+#include <comdef.h>
+#include <Wbemidl.h>
 #include "smb_connection.h"
 #include "argument_utility.h"
 #include "concat.h"
@@ -21,174 +18,264 @@
 #include "remote_command.h"
 #include "usage_utility.h"
 
-
 #pragma comment(lib, "wbemuuid.lib")
-#pragma comment(lib, "credui.lib")
 #pragma comment(lib, "comsuppw.lib")
 #pragma comment(lib, "Mpr.lib")
 
+static inline void vprint(bool v, const std::string& s) { if (v) std::cout << s << std::endl; }
+
+static void DumpProxyBlanket(IUnknown* pUnk, bool verbose) {
+    if (!verbose || !pUnk) return;
+    DWORD authn = 0, authz = 0, authnLevel = 0, impLevel = 0, caps = 0;
+    OLECHAR* princ = NULL;
+    HRESULT hr = CoQueryProxyBlanket(
+        pUnk, &authn, &authz, &princ, &authnLevel, &impLevel, NULL, &caps);
+    if (SUCCEEDED(hr)) {
+        std::cout << "[auth] pSvc authn=" << authn
+            << " authnLevel=" << authnLevel
+            << " impLevel=" << impLevel
+            << " caps=0x" << std::hex << caps << std::dec << std::endl;
+    }
+    if (princ) CoTaskMemFree(princ);
+}
+
+// Prefer Negotiate + SPN (still Kerberos, but avoids strict failures)
+static HRESULT SetSvcBlanketKerbPreferred(IWbemServices* pSvc, const std::wstring& spn) {
+    if (!pSvc) return E_POINTER;
+    OLECHAR* princ = (spn.empty() ? NULL : (OLECHAR*)spn.c_str());
+    return CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_GSS_NEGOTIATE,
+        RPC_C_AUTHZ_NONE,
+        princ,
+        RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        NULL,
+        EOAC_DYNAMIC_CLOAKING
+    );
+}
+
+// Hard Kerberos fallback
+static HRESULT SetSvcBlanketKerberosHard(IWbemServices* pSvc) {
+    if (!pSvc) return E_POINTER;
+    return CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_GSS_KERBEROS,
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        NULL,
+        EOAC_DYNAMIC_CLOAKING
+    );
+}
+
+// Bind explicit DOMAIN\user\pass (for -u/-p path)
+static HRESULT SetSvcBlanketUserPass(IWbemServices* pSvc,
+    const std::wstring& domain,
+    const std::wstring& user,
+    const std::wstring& pass) {
+    if (!pSvc) return E_POINTER;
+
+    COAUTHIDENTITY ident{};
+    ident.User = (USHORT*)user.c_str();
+    ident.UserLength = (ULONG)user.size();
+    ident.Domain = (USHORT*)domain.c_str();
+    ident.DomainLength = (ULONG)domain.size();
+    ident.Password = (USHORT*)pass.c_str();
+    ident.PasswordLength = (ULONG)pass.size();
+    ident.Flags = SEC_WINNT_AUTH_IDENTITY_UNICODE;
+
+    return CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_WINNT, // SSPI/NTLM
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        &ident,
+        EOAC_NONE
+    );
+}
+
+// ----------------- main -----------------
 
 int __cdecl main(int argc, char** argv) {
-    HRESULT hres;
+    bool useKerberos = false;
+    bool verbose = false;
 
-    // Initialize COM
-    hres = CoInitializeEx(0, COINIT_MULTITHREADED);
-    if (FAILED(hres)) {
-        std::cout << "Failed to initialize COM library. Error code = 0x" << std::hex << hres << std::endl;
-        return 1;
-    }
-
-    // Set general COM security levels
-    hres = CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IDENTIFY, NULL, EOAC_NONE, NULL);
-    if (FAILED(hres)) {
-        std::cout << "Failed to initialize security. Error code = 0x" << std::hex << hres << std::endl;
-        CoUninitialize();
-        return 1;
-    }
-
-    // Obtain the initial locator to WMI
-    IWbemLocator* pLoc = NULL;
-    hres = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
-    if (FAILED(hres)) {
-        std::cout << "Failed to create IWbemLocator object. Err code = 0x" << std::hex << hres << std::endl;
-        CoUninitialize();
-        return 1;
-    }
-
-    // Process command line arguments
     std::map<std::string, std::string> args;
     for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "-h" || arg == "--help") {
-            printUsage(argv[0]);
-            return 0;
-        }
-        else if ((arg == "-t" || arg == "--target" || arg == "-d" || arg == "--domain" ||
-            arg == "-u" || arg == "--user" || arg == "-p" || arg == "--password") && i + 1 < argc) {
-            args[getArgKey(arg)] = argv[++i];
+        std::string a = argv[i];
+        if (a == "-h" || a == "--help") { print_help_and_exit(argv[0]); }
+        else if (a == "-k" || a == "--kerberos") { useKerberos = true; }
+        else if (a == "-v" || a == "--verbose") { verbose = true; }
+        else if ((a == "-t" || a == "--target" ||
+            a == "-d" || a == "--domain" ||
+            a == "-u" || a == "--user" ||
+            a == "-p" || a == "--password") && i + 1 < argc) {
+            args[getArgKey(a)] = argv[++i];
         }
         else {
-            std::cerr << "Invalid argument or missing value: " << arg << std::endl;
-            printUsage(argv[0]);
-            return 1;
+            std::cerr << "Invalid argument or missing value: " << a << std::endl;
+            print_help_and_exit(argv[0]);
         }
     }
 
-    if (args.find("-t") == args.end() || args.find("-d") == args.end() ||
-        args.find("-u") == args.end() || args.find("-p") == args.end()) {
-        std::cerr << "Missing required arguments." << std::endl;
-        printUsage(argv[0]);
-        return 1;
+    if (args.find("-t") == args.end() || args.find("-d") == args.end()) {
+        std::cerr << "Missing required arguments: -t and -d are required.\n";
+        print_help_and_exit(argv[0]);
     }
 
-    // Extract and convert values to wide strings
-    std::wstring targetW = std::wstring(args["-t"].begin(), args["-t"].end());
-    std::wstring domainW = std::wstring(args["-d"].begin(), args["-d"].end());
-    std::wstring usernameW = std::wstring(args["-u"].begin(), args["-u"].end());
-    std::wstring passwordW = std::wstring(args["-p"].begin(), args["-p"].end());
+    bool haveCreds = (args.find("-u") != args.end() && args.find("-p") != args.end());
+    if (!useKerberos && !haveCreds) {
+        std::cerr << "Provide -u and -p when not using --kerberos.\n";
+        print_help_and_exit(argv[0]);
+    }
 
-    // Connect to WMI through the IWbemLocator::ConnectServer method
-    IWbemServices* pSvc = NULL;
+    std::wstring targetW(args["-t"].begin(), args["-t"].end());
+    std::wstring domainW(args["-d"].begin(), args["-d"].end());
+    std::wstring usernameW = haveCreds ? std::wstring(args["-u"].begin(), args["-u"].end()) : L"";
+    std::wstring passwordW = haveCreds ? std::wstring(args["-p"].begin(), args["-p"].end()) : L"";
+
+    // COM init
+    vprint(verbose, "[*] CoInitializeEx");
+    HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hr)) { std::cerr << "CoInitializeEx failed: 0x" << std::hex << hr << std::endl; return 1; }
+
+    vprint(verbose, "[*] CoInitializeSecurity (dynamic cloaking)");
+    hr = CoInitializeSecurity(
+        NULL, -1, NULL, NULL,
+        RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        NULL, EOAC_DYNAMIC_CLOAKING, NULL
+    );
+    if (FAILED(hr)) {
+        std::cerr << "CoInitializeSecurity failed: 0x" << std::hex << hr << std::endl;
+        CoUninitialize(); return 1;
+    }
+
+    // IWbemLocator
+    vprint(verbose, "[*] CoCreateInstance(IWbemLocator)");
+    IWbemLocator* pLoc = nullptr;
+    hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+    if (FAILED(hr) || !pLoc) {
+        std::cerr << "CoCreateInstance(IWbemLocator) failed: 0x" << std::hex << hr << std::endl;
+        CoUninitialize(); return 1;
+    }
+
+    // Connect to WMI
+    IWbemServices* pSvc = nullptr;
     std::wstring wmiPath = L"\\\\" + targetW + L"\\root\\cimv2";
-    hres = pLoc->ConnectServer(_bstr_t(wmiPath.c_str()), _bstr_t(usernameW.c_str()), _bstr_t(passwordW.c_str()), NULL, NULL, NULL, NULL, &pSvc);
-    if (FAILED(hres)) {
-        std::cout << "Could not connect. Error code = 0x" << std::hex << hres << std::endl;
-        pLoc->Release();
-        CoUninitialize();
-        return 1;
+    BSTR bPath = SysAllocString(wmiPath.c_str());
+
+    BSTR bUser = NULL, bPass = NULL, bAuthority = NULL;
+    std::wstring spnW;
+    if (useKerberos) {
+        spnW = L"HOST/" + targetW;
+        std::wstring authority = L"Kerberos:" + spnW;
+        bAuthority = SysAllocString(authority.c_str());
+        vprint(verbose, std::string("[*] Using authority ") + std::string(authority.begin(), authority.end()));
+    }
+    else {
+        bUser = SysAllocString(usernameW.c_str());
+        bPass = SysAllocString(passwordW.c_str());
     }
 
-    // Create COAUTHIDENTITY that can be used for setting security on proxy
-    COAUTHIDENTITY* userAcct = NULL;
-    COAUTHIDENTITY authIdent = { 0 };
-    authIdent.User = (USHORT*)usernameW.c_str();
-    authIdent.UserLength = usernameW.size();
-    authIdent.Domain = (USHORT*)domainW.c_str();
-    authIdent.DomainLength = domainW.size();
-    authIdent.Password = (USHORT*)passwordW.c_str();
-    authIdent.PasswordLength = passwordW.size();
-    authIdent.Flags = SEC_WINNT_AUTH_IDENTITY_UNICODE;
+    vprint(verbose, "[*] IWbemLocator::ConnectServer");
+    hr = pLoc->ConnectServer(
+        bPath, bUser, bPass, NULL, 0, bAuthority, NULL, &pSvc
+    );
 
-    userAcct = &authIdent;
+    if (bPath)      SysFreeString(bPath);
+    if (bUser)      SysFreeString(bUser);
+    if (bPass)      SysFreeString(bPass);
+    if (bAuthority) SysFreeString(bAuthority);
 
-
-    if (FAILED(hres))
-    {
-        std::cout << "Could not set proxy blanket. Error code = 0x"
-            << std::hex << hres << std::endl;
-        pSvc->Release();
-        pLoc->Release();
-        CoUninitialize();
-        return 1;
+    if (FAILED(hr) || !pSvc) {
+        std::cerr << "ConnectServer failed: 0x" << std::hex << hr << std::endl;
+        pLoc->Release(); CoUninitialize(); return 1;
     }
 
-    // Set security levels on a WMI connection
-    hres = CoSetProxyBlanket(pSvc, RPC_C_AUTHN_DEFAULT, RPC_C_AUTHZ_DEFAULT, COLE_DEFAULT_PRINCIPAL, RPC_C_AUTHN_LEVEL_PKT_PRIVACY, RPC_C_IMP_LEVEL_IMPERSONATE, userAcct, EOAC_NONE);
-    if (FAILED(hres)) {
-        std::cerr << "Failed to set proxy blanket. Error code = 0x" << std::hex << hres << std::endl;
-        pSvc->Release();
-        pLoc->Release();
-        CoUninitialize();
-        return 1;
+    // Set proxy blanket
+    HRESULT hrBlanket = S_OK;
+    if (useKerberos) {
+        vprint(verbose, "[*] SetSvcBlanketKerbPreferred");
+        hrBlanket = SetSvcBlanketKerbPreferred(pSvc, spnW);
+        if (FAILED(hrBlanket)) {
+            vprint(verbose, "[*] Preferred failed; fallback to hard Kerberos");
+            hrBlanket = SetSvcBlanketKerberosHard(pSvc);
+        }
     }
+    else {
+        vprint(verbose, "[*] SetSvcBlanketUserPass");
+        hrBlanket = SetSvcBlanketUserPass(pSvc, domainW, usernameW, passwordW);
+    }
+    if (FAILED(hrBlanket)) {
+        std::cerr << "Setting IWbemServices security failed: 0x"
+            << std::hex << hrBlanket << std::endl;
+        pSvc->Release(); pLoc->Release(); CoUninitialize(); return 1;
+    }
+    DumpProxyBlanket(pSvc, verbose);
 
-    // Connect to SMB share
+    // SMB ADMIN$ (for output retrieval)
     std::wstring smbSharePath = L"\\\\" + targetW + L"\\ADMIN$";
-    DWORD dwResult = ConnectToSMBShare(smbSharePath, domainW + L"\\" + usernameW, passwordW);
-    if (dwResult != NO_ERROR) {
-        std::cerr << "Failed to connect to SMB share. Error code = " << dwResult << std::endl;
-        pSvc->Release();
-        pLoc->Release();
-        CoUninitialize();
-        return 1;
+    if (!useKerberos) {
+        std::wstring smbUser = domainW.empty() ? usernameW : (domainW + L"\\" + usernameW);
+        DWORD dw = ConnectToSMBShare(smbSharePath, smbUser, passwordW);
+        if (dw != NO_ERROR) {
+            std::cerr << "Failed to connect to SMB share. Error code = " << dw << std::endl;
+            pSvc->Release(); pLoc->Release(); CoUninitialize(); return 1;
+        }
+    }
+    else {
+        WIN32_FIND_DATAW fd{};
+        HANDLE hFind = FindFirstFileW((smbSharePath + L"\\*").c_str(), &fd);
+        if (hFind == INVALID_HANDLE_VALUE) {
+            std::cerr << "SMB access test failed (ADMIN$). Check rights/UAC/policy." << std::endl;
+            pSvc->Release(); pLoc->Release(); CoUninitialize(); return 1;
+        }
+        FindClose(hFind);
     }
 
-    std::cout << "Connected to ROOT\\CIMV2 WMI namespace" << std::endl;
+    std::wcout << L"Connected to ROOT\\CIMV2 WMI namespace on " << targetW << std::endl;
     std::cout << "Enter commands to execute remotely (type 'exit' to quit):" << std::endl;
 
-    std::string commandLine;
-    int commandCounter = 0; // A counter to generate unique filenames
-
+    // REPL
+    std::string cmd;
+    int counter = 0;
     while (true) {
         std::cout << "> ";
-        std::getline(std::cin, commandLine);
-        if (commandLine == "exit") break;
+        if (!std::getline(std::cin, cmd)) break;
+        if (cmd == "exit") break;
+        if (cmd.empty()) continue;
 
-        if (commandLine.empty()) {
-            continue;
-        }
-
-        // Fetch current time at the beginning of each loop iteration
         auto t = std::time(nullptr);
-        std::tm tm;
-        localtime_s(&tm, &t);
+        std::tm tm{}; localtime_s(&tm, &t);
 
-        // Create a unique filename using the timestamp and command counter
         std::wostringstream ws;
-        ws << std::put_time(&tm, L"%Y%m%d%H%M%S") << L"_" << commandCounter++;
-        std::wstring timestamp = ws.str();
+        ws << std::put_time(&tm, L"%Y%m%d%H%M%S") << L"_" << counter++;
+        std::wstring stamp = ws.str();
 
-        std::wstring outputFilePath = smbSharePath + L"\\output_" + timestamp + L".txt";
-        std::wstring commandLineW = std::wstring(commandLine.begin(), commandLine.end());
+        std::wstring outLocal = L"C:\\Windows\\Temp\\output_" + stamp + L".txt";
+        std::wstring outRead = smbSharePath + L"\\Temp\\output_" + stamp + L".txt";
 
-        if (ExecuteRemoteCommand(commandLineW, pSvc, outputFilePath)) {
-            Sleep(1000); // Allow time for command execution and output to be written
-            ReadAndHandleOutput(outputFilePath);
+        std::wstring cmdW(cmd.begin(), cmd.end());
+        if (ExecuteRemoteCommand(cmdW, pSvc, outLocal)) {
+            Sleep(1000);
+            ReadAndHandleOutput(outRead);
         }
         else {
-            std::cout << "Failed to execute command." << std::endl;
+            std::cerr << "Failed to execute command (HRESULT error logged above)." << std::endl;
         }
     }
 
-    // When you have finished using the credentials,
-    // erase them from memory.
-    SecureZeroMemory(&passwordW[0], passwordW.size() * sizeof(wchar_t));
-    SecureZeroMemory(&usernameW[0], usernameW.size() * sizeof(wchar_t));
-    SecureZeroMemory(&domainW[0], domainW.size() * sizeof(wchar_t));
+    if (!passwordW.empty()) SecureZeroMemory(&passwordW[0], passwordW.size() * sizeof(wchar_t));
+    if (!usernameW.empty()) SecureZeroMemory(&usernameW[0], usernameW.size() * sizeof(wchar_t));
+    if (!domainW.empty())   SecureZeroMemory(&domainW[0], domainW.size() * sizeof(wchar_t));
 
-    // Cleanup
     pSvc->Release();
     pLoc->Release();
-
+    CoUninitialize();
     return 0;
 }

@@ -3,6 +3,6 @@
 
 #include <iostream>
 
-void printUsage(const char* programName);
+void print_help_and_exit(const char* exe);
 
 #endif // !UTILITY_H
