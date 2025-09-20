@@ -1,39 +1,92 @@
 # Windows Management Instrumentation (WMI) Command Executor
 
-This C++ program is inspired by Impacket's wmiexec.py and demonstrates how to use Windows Management Instrumentation (WMI) to execute a command on a remote Windows machine. It connects to a remote machine, sets up the necessary security settings, and then uses WMI to execute a command.
+A C++ implementation inspired by Impacket’s `wmiexec.py`, demonstrating how to execute commands remotely via Windows Management Instrumentation (WMI).
+
+This tool supports both **username/password (NTLM)** and **Kerberos (TGT from current session)** authentication, establishes an SMB connection for output retrieval, and provides an interactive shell-like interface for executing commands.
+
+---
+
+## Features
+
+* Execute arbitrary commands remotely over WMI.
+* Authentication options:
+
+  * **Username/Password (NTLM)** with explicit credentials.
+  * **Kerberos** using the current session’s TGT (`klist` shows cached tickets).
+* Automatic SMB connection to `ADMIN$` for retrieving command output.
+* Interactive REPL (type commands, output is streamed back).
+* Verbose diagnostics for debugging (`-v`).
+
+---
 
 ## Prerequisites
 
-- Windows operating system
-- Visual C++ development environment (Visual Studio recommended)
+* Windows OS
+* Visual Studio with C++ support
+* Valid credentials or a valid Kerberos TGT (e.g., via `klist`)
+
+---
 
 ## Usage
 
-1. Clone this repository or download the source code.
-2. Open the project in your preferred C++ development environment (e.g., Visual Studio).
-3. Build and compile the code.
-4. Run the compiled executable with the following command-line arguments:
-
-<Target-host> <Domain> <Username> <Password> <Command>
-
-```
-wmiexec.exe -t 192.168.40.128 -d villanova.local -u administrator -p Pa$$w0rd
+```powershell
+wmiexec.exe -t <target-host> -d <domain> [options]
 ```
 
-Replace each placeholder with the appropriate values:
+### Options
 
-- `<Target-host>`: The hostname or IP address of the target machine.
-- `<Domain>`: The domain of the user account.
-- `<Username>`: The username for authentication.
-- `<Password>`: The password for authentication.
-- `<Command>`: The command to be executed on the remote machine.
+| Option           | Description                                              |
+| ---------------- | -------------------------------------------------------- |
+| `-t, --target`   | Target host (IP, NetBIOS, or FQDN)                       |
+| `-d, --domain`   | Domain name                                              |
+| `-u, --user`     | Username (required if not using Kerberos)                |
+| `-p, --password` | Password (required if not using Kerberos)                |
+| `-k, --kerberos` | Use current session Kerberos TGT (requires NetBIOS/FQDN) |
+| `-v, --verbose`  | Enable verbose diagnostics                               |
+| `-h, --help`     | Show help                                                |
+
+---
+
+### Examples
+
+Authenticate with username and password:
+
+```powershell
+wmiexec.exe -t 192.168.1.200 -d EXAMPLE.LOCAL -u alice -p Passw0rd!
+```
+
+Authenticate with Kerberos (current TGT in memory):
+
+```powershell
+wmiexec.exe -t SRV01 -d EXAMPLE.LOCAL --kerberos
+```
+
+Verbose mode for troubleshooting:
+
+```powershell
+wmiexec.exe -t SRV01 -d EXAMPLE.LOCAL -u alice -p Passw0rd! -v
+```
+
+---
 
 ## Important Notes
 
-- This program is in an initial stage with minimal functionality, inspired by Impacket's `wmiexec.py`.
-- Ensure that you have the necessary permissions to execute remote commands on the target machine.
-- This program uses Windows-specific APIs and is intended for Windows environments.
+* Requires administrative rights on the remote machine.
+* Kerberos requires a valid TGT (`klist` to verify).
+* Tested against Windows Servers.
+* **Security Warning**: Output is written temporarily to `C:\Windows\Temp\output_<timestamp>.txt` on the target machine before being read back.
+
+---
 
 ## Future Development
 
-This project is in an early stage of development, and more features and functionality will be added in future updates.
+* Output encryption before writing to disk.
+* File upload/download support over SMB.
+* Better error handling and logging.
+
+---
+
+## Credits
+
+* Inspired by [Impacket’s wmiexec.py](https://github.com/fortra/impacket).
+* Built as a learning project for low-level COM/WMI interaction in C++.
